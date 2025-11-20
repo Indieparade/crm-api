@@ -1,71 +1,85 @@
 import express from "express";
 import cors from "cors";
+import admin from "firebase-admin";
+
+// Initialise Firebase Admin using env vars from Render
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      // If the key contains \n sequences, convert them to real newlines
+      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+    }),
+  });
+}
+
+const db = admin.firestore();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// TEMPORARY "FAKE" DATABASE — later we'll swap this for Firestore
-const companies = [
-  {
-    id: "1",
-    name: "Green IT Disposal",
-    town: "Rochdale",
-    sector: "IT / Recycling",
-    status: "Active",
-    lastEngagementDate: "2025-02-01"
-  },
-  {
-    id: "2",
-    name: "Rushton Developments",
-    town: "Rochdale",
-    sector: "Construction",
-    status: "Active",
-    lastEngagementDate: "2025-01-11"
-  },
-  {
-    id: "3",
-    name: "First Bus Rochdale",
-    town: "Rochdale",
-    sector: "Transport",
-    status: "Prospect",
-    lastEngagementDate: null
-  }
-];
-
-// POST /companies/search
-app.post("/companies/search", (req, res) => {
+// POST /companies/search - now reads from Firestore instead of a fake array
+app.post("/companies/search", async (req, res) => {
   const { query, town, sector, status } = req.body || {};
 
-  let results = companies;
+  try {
+    // Start from the 'companies' collection
+    let qRef = db.collection("companies");
 
-  if (query) {
-    const q = query.toLowerCase();
-    results = results.filter((c) => c.name.toLowerCase().includes(q));
+    // Apply exact-match filters that Firestore can handle efficiently
+    if (town) {
+      qRef = qRef.where("town", "==", town);
+    }
+    if (sector) {
+      qRef = qRef.where("sector", "==", sector);
+    }
+    if (status) {
+      qRef = qRef.where("status", "==", status);
+    }
+
+    const snapshot = await qRef.get();
+
+    const companies = [];
+
+    snapshot.forEach((doc) => {
+      const data = doc.data() || {};
+
+      // Optional free-text filter on name (done in memory)
+      if (query) {
+        const name = (data.name || "").toLowerCase();
+        if (!name.includes(query.toLowerCase())) {
+          return; // skip this doc if it doesn't match the query
+        }
+      }
+
+      // Handle lastEngagementDate as Firestore Timestamp or string
+      let lastEngagementDate = null;
+      const rawDate = data.lastEngagementDate;
+      if (rawDate) {
+        if (rawDate.toDate) {
+          lastEngagementDate = rawDate.toDate().toISOString().slice(0, 10);
+        } else if (typeof rawDate === "string") {
+          lastEngagementDate = rawDate;
+        }
+      }
+
+      companies.push({
+        id: doc.id,
+        name: data.name || "",
+        town: data.town || "",
+        sector: data.sector || "",
+        status: data.status || "",
+        lastEngagementDate,
+      });
+    });
+
+    res.json({ companies });
+  } catch (err) {
+    console.error("Error searching companies", err);
+    res.status(500).json({ error: "Internal server error" });
   }
-
-  if (town) {
-    const t = town.toLowerCase();
-    results = results.filter(
-      (c) => c.town && c.town.toLowerCase() === t
-    );
-  }
-
-  if (sector) {
-    const s = sector.toLowerCase();
-    results = results.filter(
-      (c) => c.sector && c.sector.toLowerCase().includes(s)
-    );
-  }
-
-  if (status) {
-    const st = status.toLowerCase();
-    results = results.filter(
-      (c) => c.status && c.status.toLowerCase() === st
-    );
-  }
-
-  res.json({ companies: results });
 });
 
 // Start server
